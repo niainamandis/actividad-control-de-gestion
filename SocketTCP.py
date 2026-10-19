@@ -1,6 +1,8 @@
 import socket
 import random
 import time 
+from socketUDP import SocketUDP
+from slidingWindowCC import SlidingWindowCC
 
 class SocketTCP:
 
@@ -293,3 +295,130 @@ class SocketTCP:
     header = bytes([segment["SYN"], segment["ACK"], segment["FIN"]])
     header += segment["SEQ"].to_bytes(4, "big")
     return header + segment["DATOS"]
+
+  def send_using_go_back_n(self, message):
+    # fija el tamaño de ventana
+    window_size = 8
+    buff_size = self.HEADER_SIZE + 16
+
+    # envuelve el socket ya creado en un socketudp con un solo timer
+    udp = SocketUDP()
+    udp.socket_udp = self.udp_socket
+    udp.socket_udp.setblocking(False)
+    udp.settimeout(self.timeout)
+
+    # arma la lista de datos: largo del mensaje y trozos de 16 bytes
+    msglen = len(message)
+    data_list = [msglen.to_bytes(4, "big")] + [message[i:i + 16] for i in range(0, msglen, 16)]
+    initial_seq = self.seq
+    data_window = SlidingWindowCC(window_size, data_list, initial_seq)
+
+    # envía la ventana inicial
+    for i in range(window_size):
+      data = data_window.get_data(i)
+      if data is not None:
+        seg = self.create_segment({
+            "SYN": 0, "ACK": 0, "FIN": 0,
+            "SEQ": data_window.get_sequence_number(i), "DATOS": data
+            })
+        udp.sendto(seg, self.dest_address, timer_index=0)
+
+    # repite hasta que se confirme toda la ventana
+    while data_window.get_data(0) is not None:
+      try:
+        answer, address = udp.recvfrom(buff_size)
+        seg = self.parse_segment(answer)
+        # valida que sea un ack del destino
+        if seg["ACK"] == 1 and address == self.dest_address:
+          # cuenta los segmentos confirmados por el ack acumulativo
+          steps = 0
+          for i in range(window_size):
+            data = data_window.get_data(i)
+            if data is not None and data_window.get_sequence_number(i) + len(data) <= seg["SEQ"]:
+              steps += 1
+            else:
+              break
+          if steps > 0:
+            # reinicia el timer y avanza la ventana
+            udp.stop_timer(timer_index=0)
+            data_window.move_window(steps)
+            # envía los nuevos segmentos de la ventana
+            sent_new = False
+            for i in range(window_size - steps, window_size):
+              data = data_window.get_data(i)
+              if data is not None:
+                seg_new = self.create_segment({
+                    "SYN": 0, "ACK": 0, "FIN": 0,
+                    "SEQ": data_window.get_sequence_number(i), "DATOS": data
+                    })
+                udp.sendto(seg_new, self.dest_address, timer_index=0)
+                sent_new = True
+            # reenvía el primero para reiniciar el timer si no hubo nuevos
+            if not sent_new and data_window.get_data(0) is not None:
+              seg_head = self.create_segment({
+                  "SYN": 0, "ACK": 0, "FIN": 0,
+                  "SEQ": data_window.get_sequence_number(0), "DATOS": data_window.get_data(0)
+                  })
+              udp.sendto(seg_head, self.dest_address, timer_index=0)
+      except TimeoutError:
+        # reinicia el timer y reenvía toda la ventana
+        udp.stop_timer(timer_index=0)
+        for i in range(window_size):
+          data = data_window.get_data(i)
+          if data is not None:
+            seg_re = self.create_segment({
+                "SYN": 0, "ACK": 0, "FIN": 0,
+                "SEQ": data_window.get_sequence_number(i), "DATOS": data
+                })
+            udp.sendto(seg_re, self.dest_address, timer_index=0)
+
+    # actualiza el seq con los bytes enviados
+    self.seq = initial_seq + sum(len(d) for d in data_list)
+    # devuelve el socket a modo bloqueante
+    self.udp_socket.settimeout(None)
+
+  def recv_using_go_back_n(self, buff_size):
+    read_buff_size = self.HEADER_SIZE + 16
+    # reinicia el estado si el mensaje anterior ya se entregó completo
+    if self.msg_len is not None and self.msg_received == self.msg_len and not self.rec_buff:
+      self.msg_len = None
+      self.msg_received = 0
+
+    # espera el segmento con el largo del mensaje
+    while self.msg_len is None:
+      seg_bytes, addr = self.udp_socket.recvfrom(read_buff_size)
+      seg = self.parse_segment(seg_bytes)
+      if seg["SYN"] == 0 and seg["ACK"] == 0 and seg["FIN"] == 0:
+        # acepta solo el seq esperado
+        if seg["SEQ"] == self.expected_seq:
+          self.msg_len = int.from_bytes(seg["DATOS"], "big")
+          self.expected_seq += len(seg["DATOS"])
+        # responde con el siguiente seq esperado
+        ack = self.create_segment({
+            "SYN": 0, "ACK": 1, "FIN": 0,
+            "SEQ": self.expected_seq, "DATOS": b""
+            })
+        self.udp_socket.sendto(ack, self.dest_address)
+
+    # recibe datos hasta completar lo pedido
+    recibo = min(self.msg_len - (self.msg_received - len(self.rec_buff)), buff_size)
+    while len(self.rec_buff) < recibo and self.msg_received < self.msg_len:
+      seg_bytes, addr = self.udp_socket.recvfrom(read_buff_size)
+      seg = self.parse_segment(seg_bytes)
+      if seg["SYN"] == 0 and seg["ACK"] == 0 and seg["FIN"] == 0:
+        # guarda solo si el seq es el esperado
+        if seg["SEQ"] == self.expected_seq:
+          self.rec_buff += seg["DATOS"]
+          self.msg_received += len(seg["DATOS"])
+          self.expected_seq += len(seg["DATOS"])
+        # responde con el siguiente seq esperado
+        ack = self.create_segment({
+            "SYN": 0, "ACK": 1, "FIN": 0,
+            "SEQ": self.expected_seq, "DATOS": b""
+            })
+        self.udp_socket.sendto(ack, self.dest_address)
+
+    # retorna los datos pedidos
+    devolver = self.rec_buff[:buff_size]
+    self.rec_buff = self.rec_buff[buff_size:]
+    return devolver
