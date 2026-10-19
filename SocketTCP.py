@@ -107,6 +107,14 @@ class SocketTCP:
     return new_sock, new_sock.origin_address
 
   def send(self, message):
+    # deja vacía hasta agregar el modo en el paso 3
+    pass
+
+  def recv(self, buff_size):
+    # deja vacía hasta agregar el modo en el paso 3
+    pass
+
+  def send_using_stop_and_wait(self, message):
     self.udp_socket.settimeout(self.timeout)
     def _send(payload):
       buff_size = self.HEADER_SIZE + 16 
@@ -137,7 +145,7 @@ class SocketTCP:
 
     self.udp_socket.settimeout(None)
 
-  def recv(self, buff_size):
+  def recv_using_stop_and_wait(self, buff_size):
     read_buff_size = self.HEADER_SIZE + 16
     # si el mensaje anterior ya se entregó completo, empezamos uno nuevo
     if self.msg_len is not None and self.msg_received == self.msg_len and not self.rec_buff:
@@ -282,5 +290,3 @@ class SocketTCP:
     header = bytes([segment["SYN"], segment["ACK"], segment["FIN"]])
     header += segment["SEQ"].to_bytes(4, "big")
     return header + segment["DATOS"]
-
-
