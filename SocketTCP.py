@@ -112,12 +112,17 @@ class SocketTCP:
     # elige la función según el modo
     if mode == "stop_and_wait":
       self.send_using_stop_and_wait(message)
+    elif mode == "go_back_n":
+      self.send_using_go_back_n(message)
 
   def recv(self, buff_size, mode="stop_and_wait"):
     # elige la función según el modo
     if mode == "stop_and_wait":
       # retorna los datos recibidos
       return self.recv_using_stop_and_wait(buff_size)
+    elif mode == "go_back_n":
+      # retorna los datos recibidos
+      return self.recv_using_go_back_n(buff_size)
 
   def send_using_stop_and_wait(self, message):
     self.udp_socket.settimeout(self.timeout)
