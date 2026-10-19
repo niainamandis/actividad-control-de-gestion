@@ -106,13 +106,16 @@ class SocketTCP:
     new_sock.udp_socket.settimeout(None)
     return new_sock, new_sock.origin_address
 
-  def send(self, message):
-    # deja vacía hasta agregar el modo en el paso 3
-    pass
+  def send(self, message, mode="stop_and_wait"):
+    # elige la función según el modo
+    if mode == "stop_and_wait":
+      self.send_using_stop_and_wait(message)
 
-  def recv(self, buff_size):
-    # deja vacía hasta agregar el modo en el paso 3
-    pass
+  def recv(self, buff_size, mode="stop_and_wait"):
+    # elige la función según el modo
+    if mode == "stop_and_wait":
+      # retorna los datos recibidos
+      return self.recv_using_stop_and_wait(buff_size)
 
   def send_using_stop_and_wait(self, message):
     self.udp_socket.settimeout(self.timeout)
