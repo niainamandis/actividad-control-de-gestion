@@ -3,6 +3,7 @@ import random
 import time
 from socketUDP import SocketUDP
 from slidingWindowCC import SlidingWindowCC
+from CongestionControl import CongestionControl
 
 class SocketTCP:
 
@@ -21,6 +22,13 @@ class SocketTCP:
     self.msg_len = None # se define al llegar un msje
     self.msg_received = 0
     self.rec_buff = b""
+
+    # parte 3
+    self.congestion_controller = CongestionControl(8)
+    self.congestion_control_on = False
+
+  def set_congestion_control(self, status: bool):
+    self.congestion_control_on = status
 
   def bind(self, address):
     self.udp_socket.bind(address)
@@ -140,7 +148,7 @@ class SocketTCP:
 
   def send_using_go_back_n(self, message):
     # fija el tamaño de ventana
-    window_size = 8
+    window_size = self.congestion_controller.get_MSS_in_cwnd() if self.congestion_control_on else 8
 
     # envuelve el socket ya creado en un socketudp con un solo timer
     udp = SocketUDP()
@@ -150,10 +158,16 @@ class SocketTCP:
 
     # arma la lista de datos: largo del mensaje y trozos de 16 bytes
     msglen = len(message)
-    data_list = [msglen.to_bytes(4, "big")] + [message[i:i + 16] for i in range(0, msglen, 16)]
+    # tamaño 16
+    # data_list = [msglen.to_bytes(4, "big")] + [message[i:i + 16] for i in range(0, msglen, 16)]
+    # tamaño 8
+    data_list = [msglen.to_bytes(4, "big")] + [message[i:i + 8] for i in range(0, msglen, 8)]
     initial_seq = self.seq
     data_window = SlidingWindowCC(window_size, data_list, initial_seq)
 
+
+    if self.congestion_control_on:
+      print(f"[DEBUG CC] Inicio -> Estado: {self.congestion_controller.current_state} | cwnd: {self.congestion_controller.get_cwnd()} B | window_size: {data_window.window_size} MSS | ssthresh: {self.congestion_controller.get_ssthresh()}")
     # envía la ventana inicial
     self._send_window(udp, data_window)
 
@@ -164,25 +178,55 @@ class SocketTCP:
         seg = self.parse_segment(answer)
         # valida que sea un ack del destino
         if seg["ACK"] == 1 and address == self.dest_address:
+
+          # caso borde donde ack supera la ventana reducida
+          while True:
+            last_idx = data_window.window_size - 1
+            last_data = data_window.get_data(last_idx)
+            last_seq = data_window.get_sequence_number(last_idx)
+            if last_data is not None and last_seq is not None and seg["SEQ"] > last_seq + len(last_data):
+              udp.stop_timer(timer_index=0)
+              data_window.move_window(data_window.window_size)
+            else:
+              break
+
           # cuenta los segmentos confirmados por el ack acumulativo
           steps = 0
-          for i in range(window_size):
+          for i in range(data_window.window_size):
             data = data_window.get_data(i)
             if data is not None and data_window.get_sequence_number(i) + len(data) <= seg["SEQ"]:
               steps += 1
             else:
               break
+
           if steps > 0:
             # reinicia el timer y avanza la ventana
             udp.stop_timer(timer_index=0)
             data_window.move_window(steps)
-            # envía los nuevos segmentos; si no hay, reenvía el primero para reiniciar el timer
-            sent_new = self._send_window(udp, data_window, window_size - steps)
-            if not sent_new:
+            old_sz = data_window.window_size
+            if self.congestion_control_on:
+              for _ in range(steps):
+                self.congestion_controller.event_ack_received()
+              new_sz = self.congestion_controller.get_MSS_in_cwnd()
+              if new_sz != old_sz:
+                data_window.update_window_size(new_sz)
+
+              print(f"[DEBUG CC] ACK recibido ({steps} segs) -> Estado: {self.congestion_controller.current_state} | cwnd: {self.congestion_controller.get_cwnd()} B | window_size: {data_window.window_size} MSS | ssthresh: {self.congestion_controller.get_ssthresh()}")
+
+            new_elements = steps + max(0,data_window.window_size - old_sz)
+            sent_new = self._send_window(udp, data_window, max(0, data_window.window_size - new_elements))
+            if not sent_new and data_window.get_data(0) is not None:
               self._send_from_window(udp, data_window, 0)
+
       except TimeoutError:
         # reinicia el timer y reenvía toda la ventana
         udp.stop_timer(timer_index=0)
+        if self.congestion_control_on:
+          self.congestion_controller.event_timeout()
+          new_window_size = self.congestion_controller.get_MSS_in_cwnd()
+          data_window.update_window_size(new_window_size)
+
+          print(f"[DEBUG CC] TIMEOUT -> Estado: {self.congestion_controller.current_state} | cwnd: {self.congestion_controller.get_cwnd()} B | window_size: {data_window.window_size} MSS | ssthresh: {self.congestion_controller.get_ssthresh()}")
         self._send_window(udp, data_window)
 
     # actualiza el seq con los bytes enviados
